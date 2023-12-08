@@ -3,6 +3,7 @@ import pickle
 import argparse
 import torchmetrics
 import numpy as np
+from torchmetrics import Metric
 from dataclasses import dataclass
 from flash.core.utilities.imports import requires
 from collections import OrderedDict
@@ -90,6 +91,26 @@ class CaptionLoss(nn.Module):
         )
 
 
+class Accuracy(Metric):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.add_state("correct", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.pad_id = 0
+
+    def update(self, outputs: dict) -> None:
+        logits = outputs["text_tokens_logits"]
+        labels = outputs["labels"]
+        for i in range(logits.size(0)):
+            pred = torch.argmax(logits[i], dim=0)
+            nopad = labels[i].ne(self.pad_id)
+            self.correct += (pred.eq(labels[i]) & nopad).sum()
+            self.total += nopad.sum()
+
+    def compute(self) -> Tensor:
+        return self.correct.float() / self.total
+
+
 class BaselineVLMClassifier(pl.LightningModule):
     def __init__(
         self,
@@ -140,29 +161,8 @@ class BaselineVLMClassifier(pl.LightningModule):
         self.loss_fn = CaptionLoss(tokenizer=self.tokenizer)
 
         # Metrics
-        self.train_map = torchmetrics.AveragePrecision(
-            task="multilabel", average="macro", num_labels=num_classes
-        )
-
-        self.train_none_map = torchmetrics.AveragePrecision(
-            task="multilabel", average=None, num_labels=num_classes
-        )
-
-        self.val_map = torchmetrics.AveragePrecision(
-            task="multilabel", average="macro", num_labels=num_classes
-        )
-
-        self.val_none_map = torchmetrics.AveragePrecision(
-            task="multilabel", average=None, num_labels=num_classes
-        )
-
-        self.test_map = torchmetrics.AveragePrecision(
-            task="multilabel", average="macro", num_labels=num_classes
-        )
-
-        self.test_none_map = torchmetrics.AveragePrecision(
-            task="multilabel", average=None, num_labels=num_classes
-        )
+        self.train_acc = Accuracy()
+        self.val_acc = Accuracy()
 
         self.behaviours = [
             "camera_reaction",
@@ -206,6 +206,7 @@ class BaselineVLMClassifier(pl.LightningModule):
         x_v, x_t, y = self.get_inputs(batch)
         outputs = self(x_v, x_t)
         loss = self.loss_fn(outputs)
+        self.train_acc(outputs)
         return {"loss": loss}
 
     def training_epoch_end(self, outputs):
@@ -213,6 +214,16 @@ class BaselineVLMClassifier(pl.LightningModule):
         self.log(
             "loss",
             loss,
+            logger=True,
+            on_epoch=True,
+            on_step=False,
+            prog_bar=True,
+            sync_dist=True,
+        )
+
+        self.log(
+            "train_acc",
+            self.train_acc.compute(),
             logger=True,
             on_epoch=True,
             on_step=False,
@@ -225,6 +236,7 @@ class BaselineVLMClassifier(pl.LightningModule):
         x_v, x_t, y = self.get_inputs(batch)
         outputs = self(x_v, x_t)
         loss = self.loss_fn(outputs)
+        self.val_acc(outputs)
         return {"loss": loss}
 
     def validation_epoch_end(self, outputs):
@@ -236,6 +248,16 @@ class BaselineVLMClassifier(pl.LightningModule):
             on_epoch=True,
             on_step=False,
             prog_bar=False,
+            sync_dist=True,
+        )
+
+        self.log(
+            "val_acc",
+            self.val_acc.compute(),
+            logger=True,
+            on_epoch=True,
+            on_step=False,
+            prog_bar=True,
             sync_dist=True,
         )
 
