@@ -1,3 +1,4 @@
+import ast
 import torch
 import pickle
 import argparse
@@ -110,6 +111,9 @@ class BaselineVLMClassifier(pl.LightningModule):
         num_classes,
         num_frames,
         path_to_ckpt,
+        freeze_lm,
+        freeze_visual_spatial,
+        freeze_visual_temporal,
     ):
         super().__init__()
         self.lr = lr
@@ -121,9 +125,9 @@ class BaselineVLMClassifier(pl.LightningModule):
             project_embed_dim=256,
             gated_xattn=True,
             timesformer_gated_xattn=False,
-            freeze_lm_vclm=True,
-            freeze_visual_vclm=True,
-            freeze_visual_vclm_temporal=True,
+            freeze_lm_vclm=freeze_lm,
+            freeze_visual_vclm=freeze_visual_spatial,
+            freeze_visual_vclm_temporal=freeze_visual_temporal,
             num_frames=num_frames,
             drop_path_rate=0.0,
         )
@@ -204,12 +208,12 @@ class BaselineVLMClassifier(pl.LightningModule):
         outputs = self(x_v, x_t)
         loss = self.loss_fn(outputs)
         self.val_acc(outputs)
-        return {"loss": loss}
+        return {"val_loss": loss}
 
     def validation_epoch_end(self, outputs):
-        loss = torch.stack([x["loss"] for x in outputs]).mean()
+        loss = torch.stack([x["val_loss"] for x in outputs]).mean()
         self.log(
-            "loss",
+            "val_loss",
             loss,
             logger=True,
             on_epoch=True,
@@ -256,6 +260,9 @@ def main():
     parser.add_argument("--sequence_length", type=int, required=True)
     parser.add_argument("--num_classes", type=int, required=False, default=18)
     parser.add_argument("--lr", type=float, required=False, default=1e-5)
+    parser.add_argument("--freeze_lm", type=int, required=True)
+    parser.add_argument("--freeze_visual_spatial", type=int, required=True)
+    parser.add_argument("--freeze_visual_temporal", type=int, required=True)
 
     # Trainer args
     parser.add_argument("--num_nodes", type=int, required=False, default=1)
@@ -304,8 +311,8 @@ def main():
         callbacks=[
             ModelCheckpoint(
                 dirpath=f"./checkpoints/{args.model_name}_{args.sequence_length}f_{args.lr}",
-                monitor="val_map",
-                mode="max",
+                monitor="loss",
+                mode="min",
             )
         ],
     )
@@ -315,6 +322,9 @@ def main():
         num_classes=args.num_classes,
         num_frames=args.sequence_length,
         path_to_ckpt="/home/dl18206/Downloads/vclm_openai_timesformer_base_gpt2_base.pt_ego4d.jobid_319630.ep_0002.md5sum_68a71f.pth",
+        freeze_lm=args.freeze_lm,
+        freeze_visual_spatial=args.freeze_visual_spatial,
+        freeze_visual_temporal=args.freeze_visual_temporal,
     )
 
     # Load tensor dataset
