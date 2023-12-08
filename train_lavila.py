@@ -35,14 +35,6 @@ from lavila.models.tokenizer import MyGPT2Tokenizer
 torch.set_float32_matmul_precision("high")
 
 
-def resolver(root, file_id):
-    return os.path.join(root, f"{file_id}.mp4")
-
-
-def normalize(x: Tensor) -> Tensor:
-    return x / 255.0
-
-
 @dataclass
 class CustomTargetFormatter(TargetFormatter):
     def format(self, target: Any) -> Any:
@@ -142,7 +134,7 @@ class BaselineVLMClassifier(pl.LightningModule):
         for k, v in ckpt["state_dict"].items():
             state_dict[k.replace("module.", "")] = v
 
-        # Load pretrained weights
+        # Load pretrained weights + drop size mismatches
         model_state_dict = self.model.state_dict()
         is_changed = False
         for k in state_dict:
@@ -163,31 +155,6 @@ class BaselineVLMClassifier(pl.LightningModule):
         # Metrics
         self.train_acc = Accuracy()
         self.val_acc = Accuracy()
-
-        self.behaviours = [
-            "camera_reaction",
-            "tool_use",
-            "object_carrying",
-            "bipedal",
-            "feeding",
-            "chimp_carrying",
-            "vocalisation",
-            "climbing",
-            "aggression",
-            "travel",
-            "sex",
-            "piloerection",
-            "social_interaction",
-            "grooming",
-            "display",
-            "cross_species_interaction",
-            "resting",
-            "playing",
-        ]
-
-    def decode(self, encoded_label, labels):
-        indices = np.where(np.array(encoded_label) == 1)
-        return [labels[i] for i in indices[0]]
 
     def forward(self, x_v, x_t):
         from einops import rearrange
