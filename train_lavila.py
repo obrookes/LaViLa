@@ -253,6 +253,7 @@ def main():
 
     # Data args
     parser.add_argument("--path_to_dataset", type=str, required=True)
+    parser.add_argument("--path_to_ckpt", type=str, required=True)
     parser.add_argument("--desc_key", type=str, required=True)
 
     # Model args
@@ -321,7 +322,7 @@ def main():
         lr=args.lr,
         num_classes=args.num_classes,
         num_frames=args.sequence_length,
-        path_to_ckpt="/home/dl18206/Downloads/vclm_openai_timesformer_base_gpt2_base.pt_ego4d.jobid_319630.ep_0002.md5sum_68a71f.pth",
+        path_to_ckpt=args.path_to_ckpt,
         freeze_lm=args.freeze_lm,
         freeze_visual_spatial=args.freeze_visual_spatial,
         freeze_visual_temporal=args.freeze_visual_temporal,
