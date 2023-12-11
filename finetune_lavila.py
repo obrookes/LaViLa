@@ -337,7 +337,7 @@ def main():
         limit_val_batches=args.limit_val_batches,
         callbacks=[
             ModelCheckpoint(
-                dirpath=f"./checkpoints/lavila_finetune_{args.sequence_length}_{args.lr}",
+                dirpath=f"./checkpoints/lavila_finetune_{args.sequence_length}_{args.lr}{ckpt_name}",
                 monitor="val_map",
                 mode="max",
             )
