@@ -76,6 +76,11 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+.ipynb
+
+# Logging
+wandb/
+checkpoints/
 
 # IPython
 profile_default/
