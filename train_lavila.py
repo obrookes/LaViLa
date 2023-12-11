@@ -4,6 +4,7 @@ import pickle
 import argparse
 import torchmetrics
 import numpy as np
+from einops import rearrange
 from torchmetrics import Metric
 from dataclasses import dataclass
 from flash.core.utilities.imports import requires
@@ -116,10 +117,14 @@ class BaselineVLMClassifier(pl.LightningModule):
         freeze_lm,
         freeze_visual_spatial,
         freeze_visual_temporal,
+        warmup_epochs,
+        max_epochs,
     ):
         super().__init__()
         self.lr = lr
         self.num_classes = num_classes
+        self.warmup_epochs = warmup_epochs
+        self.max_epochs = max_epochs
 
         # Initialise LaVila
         self.model = VCLM_OPENAI_TIMESFORMER_BASE_GPT2(
@@ -163,9 +168,7 @@ class BaselineVLMClassifier(pl.LightningModule):
         self.val_acc = Accuracy()
 
     def forward(self, x_v, x_t):
-        from einops import rearrange
-
-        tokens = self.tokenizer(x_t)
+        tokens = self.tokenizer(x_t).to(self.device)
         outputs = self.model(
             image=rearrange(x_v, "b t c w h -> b c t w h"), text=tokens
         )
@@ -177,10 +180,13 @@ class BaselineVLMClassifier(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x_v, x_t, y = self.get_inputs(batch)
-        outputs = self(x_v, x_t)
-        loss = self.loss_fn(outputs)
-        self.train_acc(outputs)
-        return {"loss": loss}
+        try:
+            outputs = self(x_v, x_t)
+            loss = self.loss_fn(outputs)
+            self.train_acc(outputs)
+            return {"loss": loss}
+        except:
+            return None
 
     def training_epoch_end(self, outputs):
         loss = torch.stack([x["loss"] for x in outputs]).mean()
@@ -200,17 +206,20 @@ class BaselineVLMClassifier(pl.LightningModule):
             logger=True,
             on_epoch=True,
             on_step=False,
-            prog_bar=False,
+            prog_bar=True,
             sync_dist=True,
         )
 
     # Validation Loop #
     def validation_step(self, batch, batch_idx):
         x_v, x_t, y = self.get_inputs(batch)
-        outputs = self(x_v, x_t)
-        loss = self.loss_fn(outputs)
-        self.val_acc(outputs)
-        return {"val_loss": loss}
+        try:
+            outputs = self(x_v, x_t)
+            loss = self.loss_fn(outputs)
+            self.val_acc(outputs)
+            return {"val_loss": loss}
+        except:
+            return None
 
     def validation_epoch_end(self, outputs):
         loss = torch.stack([x["val_loss"] for x in outputs]).mean()
@@ -245,7 +254,9 @@ class BaselineVLMClassifier(pl.LightningModule):
         # Optimiser
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
         scheduler = LinearWarmupCosineAnnealingLR(
-            optimizer, warmup_epochs=10, max_epochs=50
+            optimizer,
+            warmup_epochs=self.warmup_epochs,
+            max_epochs=self.max_epochs,
         )
         return [optimizer], [scheduler]
 
@@ -266,6 +277,7 @@ def main():
     parser.add_argument("--freeze_lm", type=int, required=True)
     parser.add_argument("--freeze_visual_spatial", type=int, required=True)
     parser.add_argument("--freeze_visual_temporal", type=int, required=True)
+    parser.add_argument("--warmup_epochs", type=int, required=False, default=10)
 
     # Trainer args
     parser.add_argument("--num_nodes", type=int, required=False, default=1)
@@ -273,7 +285,7 @@ def main():
     parser.add_argument("--strategy", type=str, required=False, default="ddp")
     parser.add_argument("--devices", type=int, required=True)
 
-    parser.add_argument("--max_epochs", type=int, required=False, default=100)
+    parser.add_argument("--max_epochs", type=int, required=False, default=50)
     parser.add_argument(
         "--accumulate_grad_batches", type=int, required=False, default=1
     )
@@ -288,13 +300,19 @@ def main():
     parser.add_argument("--batch_size", type=int, required=True)
     parser.add_argument("--num_workers", type=int, required=True)
 
+    # Ckpt naming
+    parser.add_argument("--ckpt_name", type=str, required=False, default=None)
+
     args = parser.parse_args()
 
     pl.seed_everything(42, workers=True)
+
+    ckpt_name = f"_{args.ckpt_name}" if args.ckpt_name else ""
+
     wand_logger = WandbLogger(
         offline=True,
-        name=f"{args.model_name}_{args.sequence_length}f_{args.lr}",
-        id=f"{args.model_name}_{args.sequence_length}f_{args.lr}",
+        name=f"lavila_{args.sequence_length}f_{args.lr}_{args.desc_key}{ckpt_name}",
+        id=f"lavila_{args.sequence_length}f_{args.lr}_{args.desc_key}{ckpt_name}",
     )
 
     torch.autograd.set_detect_anomaly(True)
@@ -313,10 +331,13 @@ def main():
         limit_val_batches=args.limit_val_batches,
         callbacks=[
             ModelCheckpoint(
-                dirpath=f"./checkpoints/{args.model_name}_{args.sequence_length}f_{args.lr}",
+                dirpath=f"./checkpoints/lavila_min-loss_{args.sequence_length}f_{args.lr}_{args.desc_key}{ckpt_name}",
                 monitor="loss",
                 mode="min",
-            )
+            ),
+            ModelCheckpoint(
+                dirpath=f"./checkpoints/lavila_last-epoch_{args.sequence_length}f_{args.lr}_{args.desc_key}{ckpt_name}",
+            ),
         ],
     )
 
@@ -328,6 +349,8 @@ def main():
         freeze_lm=args.freeze_lm,
         freeze_visual_spatial=args.freeze_visual_spatial,
         freeze_visual_temporal=args.freeze_visual_temporal,
+        warmup_epochs=args.warmup_epochs,
+        max_epochs=args.max_epochs,
     )
 
     # Load tensor dataset
@@ -372,7 +395,7 @@ def main():
     )
 
     trainer.fit(model, datamodule=datamodule)
-    trainer.test(model, datamodule=datamodule, ckpt_path="best")
+    trainer.test(model, datamodule=datamodule)
 
 
 if __name__ == "__main__":
