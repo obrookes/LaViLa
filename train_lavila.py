@@ -48,6 +48,8 @@ class CustomTransform(InputTransform):
     def train_per_batch_transform(self) -> Callable:
         train_transform = Compose(
             [
+                RandomHorizontalFlip(p=0.2),
+                RandomVerticalFlip(p=0.2),
                 RandAugment(num_ops=4, magnitude=7),
                 Normalize(mean=[0.5017, 0.5159, 0.5168], std=[0.2814, 0.2778, 0.2635]),
             ]
