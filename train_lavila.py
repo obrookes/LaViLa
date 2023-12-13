@@ -4,6 +4,7 @@ import pickle
 import argparse
 import torchmetrics
 import numpy as np
+import pandas as pd
 from einops import rearrange
 from torchmetrics import Metric
 from dataclasses import dataclass
@@ -119,12 +120,14 @@ class BaselineVLMClassifier(pl.LightningModule):
         freeze_visual_temporal,
         warmup_epochs,
         max_epochs,
+        predict_results=None,
     ):
         super().__init__()
         self.lr = lr
         self.num_classes = num_classes
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
+        self.predict_results = predict_results
 
         # Initialise LaVila
         self.model = VCLM_OPENAI_TIMESFORMER_BASE_GPT2(
@@ -243,12 +246,54 @@ class BaselineVLMClassifier(pl.LightningModule):
             sync_dist=True,
         )
 
-    # Test loop
-    def test_step(self, batch, batch_idx):
-        pass
+    def decode_one(self, generated_ids):
+        # get the index of <EOS>
+        if self.tokenizer.eos_token_id == self.tokenizer.bos_token_id:
+            if self.tokenizer.eos_token_id in generated_ids[1:].tolist():
+                eos_id = (
+                    generated_ids[1:].tolist().index(self.tokenizer.eos_token_id) + 1
+                )
+            else:
+                eos_id = len(generated_ids.tolist()) - 1
+        elif self.tokenizer.eos_token_id in generated_ids.tolist():
+            eos_id = generated_ids.tolist().index(self.tokenizer.eos_token_id)
+        else:
+            eos_id = len(generated_ids.tolist()) - 1
 
-    def test_epoch_end(self, outputs):
-        pass
+        generated_text_str = self.tokenizer.tokenizer.decode(
+            generated_ids[1:eos_id].tolist()
+        )
+        return generated_text_str
+
+    def on_predict_epoch_start(self):
+        # Embeddings/labels to be stored on the inference set
+        self.gt_descs = []
+        self.labels = []
+        self.pred_descs = []
+
+    def predict_step(self, batch, batch_idx):
+        x_v, x_t, y = self.get_inputs(batch)
+        video_feats = self.model.encode_image(rearrange(x_v, "b t c w h -> b c t w h"))
+        generated_ids = self.model.beam_sample(
+            image_tokens=video_feats, tokenizer=self.tokenizer
+        )
+        decoded_output = self.decode_one(generated_ids[0][0])
+
+        self.gt_descs.extend(x_t)
+        self.pred_descs.extend([decoded_output])
+        self.labels.extend(y.tolist())
+
+    def on_predict_epoch_end(self, results):
+        df = pd.DataFrame(
+            {
+                "gt_desc": self.gt_descs,
+                "pred_desc": self.pred_descs,
+                "label": self.labels,
+            }
+        ).to_csv(
+            f"./{self.predict_results}",
+            index=False,
+        )
 
     def configure_optimizers(self):
         # Optimiser
@@ -270,7 +315,6 @@ def main():
     parser.add_argument("--desc_key", type=str, required=True)
 
     # Model args
-    parser.add_argument("--model_name", type=str, default="modelo")
     parser.add_argument("--sequence_length", type=int, required=True)
     parser.add_argument("--num_classes", type=int, required=False, default=18)
     parser.add_argument("--lr", type=float, required=False, default=1e-5)
@@ -278,8 +322,12 @@ def main():
     parser.add_argument("--freeze_visual_spatial", type=int, required=True)
     parser.add_argument("--freeze_visual_temporal", type=int, required=True)
     parser.add_argument("--warmup_epochs", type=int, required=False, default=10)
+    parser.add_argument(
+        "--load_model_from_ckpt", type=str, required=False, default=None
+    )
 
     # Trainer args
+    parser.add_argument("--run", type=str, required=True)
     parser.add_argument("--num_nodes", type=int, required=False, default=1)
     parser.add_argument("--accelerator", type=str, required=False, default="gpu")
     parser.add_argument("--strategy", type=str, required=False, default="ddp")
@@ -302,6 +350,11 @@ def main():
 
     # Ckpt naming
     parser.add_argument("--ckpt_name", type=str, required=False, default=None)
+
+    # Predict results
+    parser.add_argument(
+        "--predict_results", type=str, required=False, default="my_results.csv"
+    )
 
     args = parser.parse_args()
 
@@ -341,17 +394,33 @@ def main():
         ],
     )
 
-    model = BaselineVLMClassifier(
-        lr=args.lr,
-        num_classes=args.num_classes,
-        num_frames=args.sequence_length,
-        path_to_ckpt=args.path_to_ckpt,
-        freeze_lm=args.freeze_lm,
-        freeze_visual_spatial=args.freeze_visual_spatial,
-        freeze_visual_temporal=args.freeze_visual_temporal,
-        warmup_epochs=args.warmup_epochs,
-        max_epochs=args.max_epochs,
-    )
+    if args.run == "train":
+        model = BaselineVLMClassifier(
+            lr=args.lr,
+            num_classes=args.num_classes,
+            num_frames=args.sequence_length,
+            path_to_ckpt=args.path_to_ckpt,
+            freeze_lm=args.freeze_lm,
+            freeze_visual_spatial=args.freeze_visual_spatial,
+            freeze_visual_temporal=args.freeze_visual_temporal,
+            warmup_epochs=args.warmup_epochs,
+            max_epochs=args.max_epochs,
+            predict_results=args.predict_results,
+        )
+    elif args.run == "predict":
+        model = BaselineVLMClassifier.load_from_checkpoint(
+            args.load_model_from_ckpt,
+            lr=args.lr,
+            num_classes=args.num_classes,
+            num_frames=args.sequence_length,
+            path_to_ckpt=args.path_to_ckpt,
+            freeze_lm=args.freeze_lm,
+            freeze_visual_spatial=args.freeze_visual_spatial,
+            freeze_visual_temporal=args.freeze_visual_temporal,
+            warmup_epochs=args.warmup_epochs,
+            max_epochs=args.max_epochs,
+            predict_results=args.predict_results,
+        )
 
     # Load tensor dataset
     print("Loading dataset...")
@@ -394,8 +463,10 @@ def main():
         target_formatter=formatter,
     )
 
-    trainer.fit(model, datamodule=datamodule)
-    trainer.test(model, datamodule=datamodule)
+    if args.run == "train":
+        trainer.fit(model, datamodule=datamodule)
+    elif args.run == "predict":
+        trainer.predict(model, dataloaders=datamodule.val_dataloader())
 
 
 if __name__ == "__main__":
