@@ -121,6 +121,7 @@ class BaselineVLMClassifier(pl.LightningModule):
         warmup_epochs,
         max_epochs,
         predict_results=None,
+        path_to_behaviours=None,
     ):
         super().__init__()
         self.lr = lr
@@ -128,6 +129,7 @@ class BaselineVLMClassifier(pl.LightningModule):
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
         self.predict_results = predict_results
+        self.path_to_behaviours = path_to_behaviours
 
         # Initialise LaVila
         self.model = VCLM_OPENAI_TIMESFORMER_BASE_GPT2(
@@ -170,6 +172,10 @@ class BaselineVLMClassifier(pl.LightningModule):
         self.train_acc = Accuracy()
         self.val_acc = Accuracy()
 
+        if path_to_behaviours:
+            with open(self.path_to_behaviours, "r") as f:
+                self.behaviours = [x.split("\n")[0] for x in f.readlines()]
+
     def forward(self, x_v, x_t):
         tokens = self.tokenizer(x_t).to(self.device)
         outputs = self.model(
@@ -177,8 +183,43 @@ class BaselineVLMClassifier(pl.LightningModule):
         )
         return outputs
 
+    def extract_substrings(self, input_string):
+        """
+        Extracts substrings from the input string based on matches in the match list.
+
+        Parameters:
+        - input_string (str): The input string from which to extract substrings.
+        - match_list (list): A list of strings to use as matches for extraction.
+
+        Returns:
+        - extracted_substrings (list): A list of extracted substrings.
+        """
+
+        extracted_substrings = []
+
+        for match in self.behaviours:
+            start_index = input_string.find(match)
+            while start_index != -1:
+                end_index = start_index + len(match)
+                extracted_substrings.append(input_string[start_index:end_index])
+                start_index = input_string.find(match, end_index)
+
+        return list(set(extracted_substrings))
+
+    def extract_behaviours(self, x):
+        for i, text in enumerate(x):
+            behaviour_extract = self.extract_substrings(
+                text,
+            )
+            x[i] = ", ".join(behaviour_extract)
+        return x
+
     def get_inputs(self, batch):
         x_v, x_t, y = batch["input"], batch["target"]["desc"], batch["target"]["label"]
+        if self.path_to_behaviours:
+            x_t = self.extract_behaviours(x_t)
+        else:
+            pass
         return x_v, x_t, y
 
     def training_step(self, batch, batch_idx):
@@ -356,6 +397,8 @@ def main():
         "--predict_results", type=str, required=False, default="my_results.csv"
     )
 
+    parser.add_argument("--path_to_behaviours", type=str, required=False, default=None)
+
     args = parser.parse_args()
 
     pl.seed_everything(42, workers=True)
@@ -406,6 +449,7 @@ def main():
             warmup_epochs=args.warmup_epochs,
             max_epochs=args.max_epochs,
             predict_results=args.predict_results,
+            path_to_behaviours=args.path_to_behaviours,
         )
     elif args.run == "predict":
         model = BaselineVLMClassifier.load_from_checkpoint(
@@ -420,6 +464,7 @@ def main():
             warmup_epochs=args.warmup_epochs,
             max_epochs=args.max_epochs,
             predict_results=args.predict_results,
+            path_to_behaviours=args.path_to_behaviours,
         )
 
     # Load tensor dataset
